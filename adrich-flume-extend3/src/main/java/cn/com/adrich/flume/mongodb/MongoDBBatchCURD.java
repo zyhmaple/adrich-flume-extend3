@@ -464,23 +464,24 @@ public enum MongoDBBatchCURD {
 		String orderID = doc.getString("orderID");
 		String planID = doc.getString("planID");
 
+		List<Bson> updates =  new ArrayList<Bson>(); 
 		Document document = new Document();
-		document.put("requestTimeID", requestID);
-		document.put("sspCode", sspCode);
-		document.put("orderID", orderID);
-		document.put("planID", planID);
-		document.put("log_time", timeInt);
-		document.put("log_timehour", timeInt / 100);
-		
-		Document dt = new Document();
-		dt.append("$setOnInsert", document);
-		dt.append("$set", new Document(countType, 1));
+		updates.add(Updates.setOnInsert("requestTimeID", requestID));
+		updates.add(Updates.setOnInsert("sspCode", sspCode));
+		updates.add(Updates.setOnInsert("orderID", orderID));
+		updates.add(Updates.setOnInsert("planID", planID));
+		updates.add(Updates.setOnInsert("log_time", timeInt));
+		updates.add(Updates.setOnInsert("log_timehour", timeInt / 100));
+		updates.add(Updates.set(countType, 1));
+
+
+
 
 		Map<String, Object> filterMap = new HashMap<String, Object>();
 		filterMap.put("requestTimeID", requestID);
 		// MongodbCrud.updateOneByAndEqualsUpsert(LogConstantsForExpos.MONGODB_SUMMARY,
 		// filterMap, document);
-		insertMany(MONGODB_SUMMARY, dt);
+		insertMany(MONGODB_SUMMARY, Updates.combine(updates));
 		// try {
 		// MongodbCrud.updateOneByAndEqualsUpsert(LogConstantsForExpos.MONGODB_SUMMARY,
 		// filterMap, document);
