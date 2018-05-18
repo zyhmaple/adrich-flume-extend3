@@ -379,7 +379,7 @@ public enum MongodbCrud {
 				Document dt = new Document();
 				dt.putAll((new InsertObject()).getLogClickDt());
 				dt.put("random", i);
-				insertOne(MONGODB_EXPOS, dt);
+				//insertOne(MONGODB_EXPOS, dt);
 				insertSummary(dt, "exposcount");
 				/*				insertOne(MONGODB_CLICK, dt);
 				insertSummary(dt, "clickcount");

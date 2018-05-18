@@ -3,7 +3,7 @@ package cn.com.adrich.flume.mongodb;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +35,8 @@ import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
 import com.mongodb.client.result.UpdateResult;
 
+import cn.com.adrich.flume.mongodb.MongoDBBatchCURD.UpdateField.Operator;
+
 public enum MongoDBBatchCURD {
 
 	;
@@ -56,23 +58,26 @@ public enum MongoDBBatchCURD {
 			batchProcessReqCount * blockQueueFactor);
 	private static BlockingQueue<Document> Click_Queue = new LinkedBlockingQueue<Document>(
 			batchProcessReqCount * blockQueueFactor);
-	private static BlockingQueue<Document> Summary_Queue = new LinkedBlockingQueue<Document>(
-			20 * batchProcessReqCount * blockQueueFactor);
 	private static BlockingQueue<Document> Win_Queue = new LinkedBlockingQueue<Document>(
 			batchProcessReqCount * blockQueueFactor);
+	// summary数据是win，click，expos的3倍以上；upsert比insert慢5-6倍，设定upsert队列扩大20倍
+	private static BlockingQueue<Document> Summary_Queue = new LinkedBlockingQueue<Document>(
+			20 * batchProcessReqCount * blockQueueFactor);
 	private static Map<String, BlockingQueue<Document>> COLLECTION_MQ_MAP;
 
 	// 批量插入我们要求线程间排队
-	private final static CountDownLatch winSignal = new CountDownLatch(1);
-	private final static CountDownLatch clickSignal = new CountDownLatch(1);
-	private final static CountDownLatch exposSignal = new CountDownLatch(1);
-	private final static CountDownLatch summarySignal = new CountDownLatch(1);
+	private volatile static CountDownLatch winSignal = new CountDownLatch(threadCountInSameTime / 4);
+	private volatile static CountDownLatch clickSignal = new CountDownLatch(threadCountInSameTime / 4);
+	private volatile static CountDownLatch exposSignal = new CountDownLatch(threadCountInSameTime / 4);
+	private volatile static CountDownLatch summarySignal = new CountDownLatch(
+			threadCountInSameTime - (threadCountInSameTime / 4) * 3);
 
 	/**
 	 * MongoDB错误代码：主键重复
 	 */
 	public static final String ERROR_CODE_DUPLICATE_KEY = "E11000";
 
+	// 配置
 	public static final String MONGODB_URI_KEY = "mongodb.uri";
 	public static final String MONGODB_DATABASENAME = "mongodb.databasename";
 	public static final String MONGODB_PROCESSREQ_COUNT = "mongodb.batchProcessReqCount";
@@ -85,6 +90,7 @@ public enum MongoDBBatchCURD {
 	private static MongoDatabase DATABASE;
 	private static Map<String, MongoCollection<Document>> COLLECTION_MAP;
 
+	// 记录各队列消耗线程数
 	private static Map<String, Integer> COLLECTION_THREAD_COUNT;
 
 	// 读取配置文件、初始化客户端、数据库、集合连接
@@ -114,7 +120,9 @@ public enum MongoDBBatchCURD {
 			// 同一时间最大线程数
 			threadCountInSameTime = Integer.parseInt(p.getProperty(MONGODB_THREAD_COUNT));
 
+			// 测试用，请求发送延迟
 			reqSleep = Integer.parseInt(p.getProperty(MONGODB_THREAD_REQSLEEP));
+			// 工作线程批处理延迟
 			threadSleep = Integer.parseInt(p.getProperty(MONGODB_THREAD_SLEEP));
 
 			// 将库中已存在的集合放入 Map 中缓存
@@ -133,7 +141,7 @@ public enum MongoDBBatchCURD {
 			COLLECTION_MQ_MAP.put(MONGODB_WIN, Win_Queue);
 			COLLECTION_MQ_MAP.put(MONGODB_CLICK, Click_Queue);
 			COLLECTION_MQ_MAP.put(MONGODB_EXPOS, Expos_Queue);
-			// 汇总队列，队列做事前汇总，做批量 [单个upsert]
+			// 汇总队列，队列做事前汇总，做批量 [单个upsert]，对upsert文档字段需求，做set和setOnInsert区分
 			COLLECTION_MQ_MAP.put(MONGODB_SUMMARY, Summary_Queue);
 
 			COLLECTION_THREAD_COUNT = new ConcurrentHashMap<String, Integer>();
@@ -317,6 +325,65 @@ public enum MongoDBBatchCURD {
 				updates.add(updateTemp);
 			}
 		}
+
+		Bson update = null;
+		if (updates != null) {
+			update = Updates.combine(updates);
+		}
+		return update;
+	}
+
+	/**
+	 * 根据更新 Map 构建更新Summary对象。
+	 * 
+	 * @param updateMap
+	 *            更新 Map。
+	 * @return 更新对象。
+	 * @author zyh
+	 */
+	private static Bson buildUpdate2(Map<String, Object> updateMap) {
+
+		List<Bson> updates = null;
+		if (updateMap != null) {
+			updates = new ArrayList<Bson>();
+			for (Entry<String, Object> entry : updateMap.entrySet()) {
+				String typeName = entry.getKey();
+				UpdateField typeValue = (UpdateField) entry.getValue();
+				Bson updateTemp = null;
+
+				switch (typeValue.operator) {
+				case setOnInsert: {
+					updateTemp = Updates.setOnInsert(typeValue.fieldName, typeValue.value);
+					if (updateTemp != null)
+						updates.add(updateTemp);
+					break;
+				}
+				case set: {
+					updateTemp = Updates.set(typeValue.fieldName, typeValue.value);
+					if (updateTemp != null)
+						updates.add(updateTemp);
+					break;
+				}
+				case addEachToSet: {
+					List<String> value = new ArrayList<String>();
+					value.add(typeValue.value.toString());
+					updateTemp = Updates.addEachToSet(typeValue.fieldName, value);
+					if (updateTemp != null)
+						updates.add(updateTemp);
+					break;
+				}
+				case addToSet:{
+					updateTemp = Updates.addToSet(typeValue.fieldName, typeValue.value);
+					if (updateTemp != null)
+						updates.add(updateTemp);
+					break;
+				}
+				default:
+					break;
+				}
+			}
+		}
+
 		Bson update = null;
 		if (updates != null) {
 			update = Updates.combine(updates);
@@ -422,22 +489,29 @@ public enum MongoDBBatchCURD {
 				dt.putAll((new InsertObject()).getLogClickDt());
 				dt.put("requestTimeID", i + "");
 				dt.put("requestID", i + "");
-				//insertMany(MONGODB_CLICK, dt);
-				insertSummary(dt, "clickcount");
-				//insertMany(MONGODB_EXPOS, dt);
-				insertSummary(dt, "exposcount");
-				//insertMany(MONGODB_WIN, dt);
+				insertMany(MONGODB_WIN, dt);
 				insertSummary(dt, "wincount");
 
-				if (i % (reqCount / 4) == 0)
+				insertMany(MONGODB_EXPOS, dt);
+				insertSummary(dt, "exposcount");
+
+				insertMany(MONGODB_CLICK, dt);
+				insertSummary(dt, "clickcount");
+
+				if (i % batchProcessReqCount == 0)
 					Thread.sleep(reqSleep);
 			}
-			System.out.println("AllReq spend Time:" + (System.currentTimeMillis() - begin));
+			System.out.println("[" + new Date(System.currentTimeMillis()) + "] AllReq spend Time:"
+					+ (System.currentTimeMillis() - begin));
 
-			getCountDownLatch(MONGODB_CLICK).await();
-			getCountDownLatch(MONGODB_EXPOS).await();
-			getCountDownLatch(MONGODB_WIN).await();
-			System.out.println("All spend Time:" + (System.currentTimeMillis() - begin));
+			
+			 getCountDownLatch(MONGODB_CLICK).await();
+			 getCountDownLatch(MONGODB_EXPOS).await();
+			 getCountDownLatch(MONGODB_WIN).await();
+			 
+			getCountDownLatch(MONGODB_SUMMARY).await();
+			System.out.println("[" + new Date(System.currentTimeMillis()) + "] All spend Time:"
+					+ (System.currentTimeMillis() - begin));
 			// insertOne(collectionName, document);
 
 		} catch (Exception e) {
@@ -457,37 +531,89 @@ public enum MongoDBBatchCURD {
 		}
 	}
 
+	/**
+	 * 插入log_summary
+	 * 
+	 * @param doc
+	 * @param countType
+	 * @author zyh
+	 */
 	private static void insertSummary(Document doc, String countType) {
+
 		String requestID = doc.getString("requestID");
 		int timeInt = doc.getInteger("log_time");
 		String sspCode = doc.getString("sspCode");
 		String orderID = doc.getString("orderID");
 		String planID = doc.getString("planID");
 
-		List<Bson> updates =  new ArrayList<Bson>(); 
 		Document document = new Document();
-		updates.add(Updates.setOnInsert("requestTimeID", requestID));
-		updates.add(Updates.setOnInsert("sspCode", sspCode));
-		updates.add(Updates.setOnInsert("orderID", orderID));
-		updates.add(Updates.setOnInsert("planID", planID));
-		updates.add(Updates.setOnInsert("log_time", timeInt));
-		updates.add(Updates.setOnInsert("log_timehour", timeInt / 100));
-		updates.add(Updates.set(countType, 1));
+		Document setOnInsert = new Document();
+		Document set = new Document();
 
+		setOnInsert.put("requestTimeID", requestID);
+		setOnInsert.put("sspCode", sspCode);
+		setOnInsert.put("orderID", orderID);
+		setOnInsert.put("planID", planID);
+		setOnInsert.put("log_time", timeInt);
+		setOnInsert.put("log_timehour", timeInt / 100);
+		setOnInsert.put("wincount", 0);
+		setOnInsert.put("exposcount", 0);
+		setOnInsert.put("clickcount", 0);
+		setOnInsert.remove(countType);
 
+		if ("exposcount".equals(countType)) {
+			setOnInsert.remove("log_time");
+			setOnInsert.remove("log_timehour");
+			set.put("log_time", timeInt);
+			set.put("log_timehour", timeInt / 100);
+		}
+		set.put(countType, 1);
 
+		document.put("$id", "requestTimeID");
+		document.put("$onInsert", setOnInsert);
+		document.put("$set", set);
 
-		Map<String, Object> filterMap = new HashMap<String, Object>();
-		filterMap.put("requestTimeID", requestID);
-		// MongodbCrud.updateOneByAndEqualsUpsert(LogConstantsForExpos.MONGODB_SUMMARY,
-		// filterMap, document);
-		insertMany(MONGODB_SUMMARY, Updates.combine(updates));
-		// try {
-		// MongodbCrud.updateOneByAndEqualsUpsert(LogConstantsForExpos.MONGODB_SUMMARY,
-		// filterMap, document);
-		// } catch (Exception e) {
-		// insertSummaryLast(document);
-		// }
+		upsertMany(MONGODB_SUMMARY, document);
+	}
+
+	/**
+	 * 插入log_summary
+	 * 
+	 * @param doc
+	 * @param countType
+	 * @author zyh
+	 */
+	private static void insertSummary2(Document doc, String countType) {
+
+		Map<String, Object> upfieldList = new HashMap<String, Object>(12);
+
+		String requestID = doc.getString("requestID");
+		int timeInt = doc.getInteger("log_time");
+		String sspCode = doc.getString("sspCode");
+		String orderID = doc.getString("orderID");
+		String planID = doc.getString("planID");
+
+		// 过滤条件字段
+		upfieldList.put("$filter", "requestTimeID");
+
+		upfieldList.put("requestTimeID", new UpdateField(Operator.setOnInsert, "requestTimeID", requestID));
+		upfieldList.put("sspCode", new UpdateField(Operator.setOnInsert, "sspCode", sspCode));
+		upfieldList.put("orderID", new UpdateField(Operator.setOnInsert, "orderID", orderID));
+		upfieldList.put("planID", new UpdateField(Operator.setOnInsert, "planID", planID));
+		upfieldList.put("log_time", new UpdateField(Operator.setOnInsert, "log_time", timeInt));
+		upfieldList.put("log_timehour", new UpdateField(Operator.setOnInsert, "log_timehour", timeInt / 100));
+		upfieldList.put("wincount", new UpdateField(Operator.setOnInsert, "wincount", 0));
+		upfieldList.put("exposcount", new UpdateField(Operator.setOnInsert, "exposcount", 0));
+		upfieldList.put("clickcount", new UpdateField(Operator.setOnInsert, "clickcount", 0));
+
+		if ("exposcount".equals(countType)) {
+			upfieldList.put("log_time", new UpdateField(Operator.set, "log_time", timeInt));
+			upfieldList.put("log_timehour", new UpdateField(Operator.set, "log_timehour", timeInt / 100));
+		}
+
+		upfieldList.put(countType, new UpdateField(Operator.set, countType, 1));
+
+		upsertMany(MONGODB_SUMMARY, new Document(upfieldList));
 	}
 
 	static class Worker implements Runnable {
@@ -519,15 +645,15 @@ public enum MongoDBBatchCURD {
 		}
 	}
 
+	/**
+	 * 批量插入文档
+	 * 
+	 * @param collectionName
+	 * @param document
+	 * @author zyh
+	 */
 	public static void insertMany(String collectionName, Document document) {
 		long begin = System.currentTimeMillis();
-
-		/*
-		 * MongoCollection<Document> collection = getCollection(collectionName);
-		 * 
-		 * collection.insertOne(document);
-		 */
-
 		BlockingQueue<Document> queue = COLLECTION_MQ_MAP.get(collectionName);
 		try {
 			queue.put(document);
@@ -544,22 +670,19 @@ public enum MongoDBBatchCURD {
 	}
 
 	/**
-	 * 从集合缓存中获取指定的集合连接。
+	 * 批量更新文档
 	 * 
-	 * @param dmpCollection
-	 *            要获取的集合。
-	 * @return 集合连接。
+	 * @param collectionName
+	 * @param document
+	 * @author zyh
 	 */
-	private static MongoCollection<Document> getCollectionMQ(String collectionName) {
-
-		MongoCollection<Document> collection = COLLECTION_MAP.get(collectionName);
-		if (collection == null) {
-			collection = DATABASE.getCollection(collectionName);
-			COLLECTION_MAP.put(collectionName, collection);
-		}
-		return collection;
+	public static void upsertMany(String collectionName, Document document) {
+		insertMany(collectionName, document);
 	}
 
+	/**
+	 * 批处理工作线程
+	 */
 	static class BatchWorker implements Runnable {
 		private final CountDownLatch typeSignal;
 		private String collectionName;
@@ -573,21 +696,15 @@ public enum MongoDBBatchCURD {
 			this.typeSignal = typeSignal;
 			if (MONGODB_SUMMARY.equals(collectionName))
 				summaryMap = new HashMap<String, Document>(batchProcessReqCount);
-			else
-				batchList = new ArrayList<Document>(batchProcessReqCount);
+
+			batchList = new ArrayList<Document>(batchProcessReqCount);
 		}
 
-		/*
-		 * BatchWorker(String collectionName) {
-		 * COLLECTION_THREAD_COUNT.put(collectionName,
-		 * COLLECTION_THREAD_COUNT.get(collectionName)+1); this.collectionName =
-		 * collectionName; }
-		 */
 		public void run() {
 
 			MongoCollection<Document> collection = getCollection(this.collectionName);
-
 			BlockingQueue<Document> queue = COLLECTION_MQ_MAP.get(collectionName);
+
 			while (true) {
 				try {
 
@@ -598,7 +715,8 @@ public enum MongoDBBatchCURD {
 						batchList.clear();
 					if (summaryMap != null)
 						summaryMap.clear();
-
+					if (queue.isEmpty())
+						typeSignal.countDown();
 				}
 			}
 		}
@@ -610,38 +728,48 @@ public enum MongoDBBatchCURD {
 
 			for (int i = 0; i < batchProcessReqCount; i++) {
 				try {
-					if (summaryMap != null) {
-						Document doc1 = queue.take();
-						String key = doc1.getString("requestTimeID");
-						summaryMap.put(key, UnionSummary(doc1, summaryMap.get(key)));
-					} else
-						batchList.add(queue.take());
-
-					// System.out.println("random
-					// "+Unsafe.class.(batchList.get(0)));
-					// UNSAFE.equals(batchList)
-					// typeSignal.await();
+					// summary插入前批量汇总，一边出队一边汇总，问题：影响出队效率
+					/*
+					 * if (summaryMap != null) { Document doc1 = queue.take();
+					 * String keyName = doc1.getString("$id");//主键，更新过滤条件
+					 * Document onInsert = (Document)
+					 * doc1.get("$onInsert");//插入字段 String keyValue =
+					 * onInsert.getString(keyName); //汇总后的放入map
+					 * summaryMap.put(keyValue, UnionSummary(doc1,
+					 * summaryMap.get(keyValue))); } else
+					 */
+					batchList.add(queue.take());
 				} catch (InterruptedException e) {
 					e.printStackTrace();
 				}
 			}
-			if (summaryMap != null) {
+
+			// 批量处理在出队后处理
+			if (summaryMap != null && batchList != null) {
+				for (Document doc1 : batchList) {
+					String keyName = doc1.getString("$filter");// 过滤条件；单条件
+					UpdateField keyValue = (UpdateField) doc1.get(keyName);
+					// 汇总后的放入map
+					summaryMap.put(keyValue.value.toString(), UnionSummary(doc1, summaryMap.get(keyValue.value)));
+				}
+
 				size = summaryMap.values().toArray().length;
 				UpdateOptions upsert = new UpdateOptions();
 				if (size != 0) {
 					for (Document summary : summaryMap.values()) {
 
-						String key = summary.getString("requestTimeID");
-						collection.updateOne(Filters.eq("requestTimeID", key), buildUpdate(summary),
+						String keyName = summary.getString("$filter");
+						UpdateField keyValue = (UpdateField) summary.get(keyName);
+						collection.updateOne(Filters.eq(keyName, keyValue.value), buildUpdate2(summary),
 								upsert.upsert(true));
 					}
 				}
 			} else
 				collection.insertMany(batchList);
 
-			System.out.println("Current Thread[" + Thread.currentThread().getName() + "][" + collectionName
-					+ "] BatchInsert[" + size + "条文档] SpendTime:" + (System.currentTimeMillis() - begin)
-					+ " left Queue size:" + queue.size());
+			System.out.println("[" + new Date(System.currentTimeMillis()) + "] Current Thread["
+					+ Thread.currentThread().getName() + "][" + collectionName + "] BatchProcess[" + size
+					+ "条文档] SpendTime:" + (System.currentTimeMillis() - begin) + " left Queue size:" + queue.size());
 			try {
 				Thread.sleep(threadSleep);
 			} catch (InterruptedException e) {
@@ -660,23 +788,18 @@ public enum MongoDBBatchCURD {
 
 	// SUMMMARY 需要汇总
 	private static Document UnionSummary(Document doc1, Document doc2) {
-		//doc1 新插入的；doc2已经整合的
+		// doc1 新插入的；doc2已经整合的
 		if (doc2 == null)
 			return doc1;
 
 		// 将doc1 整合到doc2
-		for (String key : doc1.keySet()) {
-			if (doc2.containsKey(key)&&"$set".equals(key))
-			{
-				Document oldSet = (Document)doc2.get(key);
-				Document newSet = (Document)doc1.get(key);
-				for (String set : newSet.keySet())
-				{	
-					oldSet.append(key, newSet.get(set));
-				}
+		for (Object obj : doc1.values()) {
+			UpdateField field = (UpdateField) obj;
+			if (Operator.set.equals(field.operator)) {
+				UpdateField newSet = (UpdateField) doc1.get(field.fieldName);
+				doc2.put(field.fieldName, newSet);
 			}
 		}
-
 		return doc2;
 	}
 
@@ -694,7 +817,6 @@ public enum MongoDBBatchCURD {
 				try {
 					Thread.sleep(1000);
 				} catch (InterruptedException e) {
-					// TODO Auto-generated catch block
 					e.printStackTrace();
 				}
 			}
@@ -703,18 +825,28 @@ public enum MongoDBBatchCURD {
 		void doWork() {
 			// 循环创建处理线程；条件队列长度大于5000且 同类线程数 不超过线程平均数
 			for (String key : COLLECTION_MQ_MAP.keySet()) {
+				// 队列大于一倍以上批处理量
 				if (COLLECTION_MQ_MAP.get(key).size() / batchProcessReqCount >= 1
+						// 线程分配数不得大于4分之一总线程数
 						&& (COLLECTION_THREAD_COUNT.get(key) < threadCountInSameTime / 4
-					||(MONGODB_SUMMARY.equals(key)
-							&& COLLECTION_THREAD_COUNT.get(key)<(threadCountInSameTime/4+threadCountInSameTime%4)))) {
+								// 汇总数据线程线程数 总数-3/4线程数
+								|| (MONGODB_SUMMARY.equals(key) && COLLECTION_THREAD_COUNT
+										.get(key) < (threadCountInSameTime - (threadCountInSameTime / 4) * 3)))) {
 					this.service.execute(new BatchWorker(key, getCountDownLatch(key)));
 					System.out.println("Queue[" + key + "] insert is Start!");
 				}
 
-				if (COLLECTION_MQ_MAP.get(key).size() == 0 && COLLECTION_THREAD_COUNT.get(key) > 0) {
-					getCountDownLatch(key).countDown();
-					// System.out.println(1);
-				}
+				// 队列处理完成
+				/*
+				 * if (COLLECTION_MQ_MAP.get(key).size() == 0 &&
+				 * COLLECTION_THREAD_COUNT.get(key) > 0) {
+				 * getCountDownLatch(key).countDown(); // System.out.println(1);
+				 * } if (COLLECTION_MQ_MAP.get(key).size() > 0 &&
+				 * COLLECTION_THREAD_COUNT.get(key)!=getCountDownLatch(key).
+				 * getCount()) {
+				 * 
+				 * // System.out.println(1); }
+				 */
 			}
 		}
 
@@ -746,6 +878,26 @@ public enum MongoDBBatchCURD {
 		default:
 			return null;
 		}
+	}
+
+	public static class UpdateField {
+		public static enum Operator {
+			set, setOnInsert, addToSet, addEachToSet
+		}
+
+		public UpdateField(String fieldName, Object value) {
+			this(Operator.set, fieldName, value);
+		}
+
+		public UpdateField(Operator operator, String fieldName, Object value) {
+			this.operator = operator;
+			this.fieldName = fieldName;
+			this.value = value;
+		}
+
+		public Operator operator;
+		public String fieldName;
+		public Object value;
 	}
 
 }
