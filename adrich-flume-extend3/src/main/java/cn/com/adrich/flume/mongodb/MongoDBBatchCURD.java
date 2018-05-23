@@ -5,16 +5,20 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+
+import javax.swing.text.html.parser.Entity;
 
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -42,11 +46,13 @@ public enum MongoDBBatchCURD {
 	;
 	private static final Logger logger = LoggerFactory.getLogger(MongoDBBatchCURD.class);
 
+	public static final String placeholder_suffix = "_t";
 	public static final String MONGODB_WIN = "log_win";
 	public static final String MONGODB_EXPOS = "log_expos";
 	public static final String MONGODB_CLICK = "log_click";
 	public static final String MONGODB_SUMMARY = "log_summary";
 	public static final String MONGODB_EXCEPTION = "log_exception_logs";
+	public static final String MONGODB_BID = "log_bid";
 
 	public static int batchProcessReqCount = 5000;
 	public static int blockQueueFactor = 8;
@@ -63,6 +69,10 @@ public enum MongoDBBatchCURD {
 	// summary数据是win，click，expos的3倍以上；upsert比insert慢5-6倍，设定upsert队列扩大20倍
 	private static BlockingQueue<Document> Summary_Queue = new LinkedBlockingQueue<Document>(
 			20 * batchProcessReqCount * blockQueueFactor);
+	
+	private static BlockingQueue<Document> Bid_Queue = new LinkedBlockingQueue<Document>(
+			2);
+	
 	private static Map<String, BlockingQueue<Document>> COLLECTION_MQ_MAP;
 
 	// 批量插入我们要求线程间排队
@@ -143,6 +153,7 @@ public enum MongoDBBatchCURD {
 			COLLECTION_MQ_MAP.put(MONGODB_EXPOS, Expos_Queue);
 			// 汇总队列，队列做事前汇总，做批量 [单个upsert]，对upsert文档字段需求，做set和setOnInsert区分
 			COLLECTION_MQ_MAP.put(MONGODB_SUMMARY, Summary_Queue);
+			COLLECTION_MQ_MAP.put(MONGODB_BID, Bid_Queue);
 
 			COLLECTION_THREAD_COUNT = new ConcurrentHashMap<String, Integer>();
 			COLLECTION_THREAD_COUNT.put(MONGODB_WIN, 0);
@@ -347,7 +358,9 @@ public enum MongoDBBatchCURD {
 		if (updateMap != null) {
 			updates = new ArrayList<Bson>();
 			for (Entry<String, Object> entry : updateMap.entrySet()) {
-				String typeName = entry.getKey();
+				//String typeName = entry.getKey();
+				if(entry.getKey().startsWith("$filter"))
+					continue;
 				UpdateField typeValue = (UpdateField) entry.getValue();
 				Bson updateTemp = null;
 
@@ -364,10 +377,22 @@ public enum MongoDBBatchCURD {
 						updates.add(updateTemp);
 					break;
 				}
+				case pull: {
+					updateTemp = Updates.pull(typeValue.fieldName, typeValue.value);
+					if (updateTemp != null)
+						updates.add(updateTemp);
+					break;
+				}
+				case unset: {
+					updateTemp = Updates.unset(typeValue.fieldName);
+					if (updateTemp != null)
+						updates.add(updateTemp);
+					break;
+				}
 				case addEachToSet: {
-					List<String> value = new ArrayList<String>();
-					value.add(typeValue.value.toString());
-					updateTemp = Updates.addEachToSet(typeValue.fieldName, value);
+/*					List<String> value = new ArrayList<String>();
+					value.add(typeValue.value.toString());*/
+					updateTemp = Updates.addEachToSet(typeValue.fieldName, (List<String>)typeValue.value);
 					if (updateTemp != null)
 						updates.add(updateTemp);
 					break;
@@ -477,59 +502,7 @@ public enum MongoDBBatchCURD {
 		}
 	}
 
-	public static void main(String[] args) throws Throwable {
-
-		int reqCount = 1000000;
-
-		try {
-			long begin = System.currentTimeMillis();
-			List<DBObject> dbObjects = new ArrayList<DBObject>();
-			for (int i = 0; i < reqCount; i++) {
-				Document dt = new Document();
-				dt.putAll((new InsertObject()).getLogClickDt());
-				dt.put("requestTimeID", i + "");
-				dt.put("requestID", i + "");
-				insertMany(MONGODB_WIN, dt);
-				insertSummary(dt, "wincount");
-
-				insertMany(MONGODB_EXPOS, dt);
-				insertSummary(dt, "exposcount");
-
-				insertMany(MONGODB_CLICK, dt);
-				insertSummary(dt, "clickcount");
-
-				if (i % batchProcessReqCount == 0)
-					Thread.sleep(reqSleep);
-			}
-			System.out.println("[" + new Date(System.currentTimeMillis()) + "] AllReq spend Time:"
-					+ (System.currentTimeMillis() - begin));
-
-			
-			 getCountDownLatch(MONGODB_CLICK).await();
-			 getCountDownLatch(MONGODB_EXPOS).await();
-			 getCountDownLatch(MONGODB_WIN).await();
-			 
-			getCountDownLatch(MONGODB_SUMMARY).await();
-			System.out.println("[" + new Date(System.currentTimeMillis()) + "] All spend Time:"
-					+ (System.currentTimeMillis() - begin));
-			// insertOne(collectionName, document);
-
-		} catch (Exception e) {
-			if (e instanceof MongoWriteException) {
-				String message = e.getMessage();
-				if (message == null) {
-					message = "";
-				}
-				if (message.startsWith("E11000")) {
-					System.out.println("no problem");
-				} else {
-					e.printStackTrace();
-				}
-			} else {
-				e.printStackTrace();
-			}
-		}
-	}
+	
 
 	/**
 	 * 插入log_summary
@@ -616,6 +589,169 @@ public enum MongoDBBatchCURD {
 		upsertMany(MONGODB_SUMMARY, new Document(upfieldList));
 	}
 
+	/**
+	 * 插入log_summary
+	 * 
+	 * @param doc
+	 * @param countType
+	 * @author zyh
+	 */
+	private static void insertSet(Document doc) {
+
+		String scid_dmpcode = doc.getString("scid_dmpcode");
+		String sspcode = doc.getString("sspcode");
+		String dmp_code = doc.getString("dmp_code");
+		/*		String dmp_cid = doc.getString("dmp_cid");
+		String dcid = doc.getString("dcid");
+		
+		String scid = doc.getString("scid");
+		Integer cookie_mapping_in = doc.getInteger("cookie_mapping_in");
+		String isApp = doc.getString("isApp");
+		
+		Object ip = doc.get("ip");
+		Object city = doc.get("city");
+		Object keywords = doc.get("keywords");
+		Object userAttributeList = doc.get("userAttributeList");
+		
+		String did = doc.getString("did");
+		String dpid = doc.getString("dpid");
+		String idfa = doc.getString("idfa");
+		String make = doc.getString("make");	
+		
+		String model = doc.getString("model");
+		String os = doc.getString("os");
+		String devicetype = doc.getString("devicetype");
+		String macmd5 = doc.getString("macmd5");
+		String mac = doc.getString("mac");
+		String updatetime = doc.getString("updatetime");	*/	
+				
+
+		Map<String, Object> upfieldDefaultList = new HashMap<String, Object>(12);
+		Map<String, Object> upfieldSetList = new HashMap<String, Object>(12);
+
+		String placeholder10 ="1234567890";
+		String placeholder20 ="12345678901234567890";
+		String placeholder64 ="123456789_123456789_123456789_123456789_123456789_123456789_1234";
+		String placeholder32 ="123456789_123456789_123456789_12";
+		List<String> placeholderIp = new ArrayList<String>(5);
+		placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");
+		placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");
+		List<String> placeholderArr = new ArrayList<String>(5);
+		placeholderArr.add("1234567890");placeholderArr.add("1234567890");placeholderArr.add("1234567890");
+		placeholderArr.add("1234567890");placeholderArr.add("1234567890");
+
+		String defaultArrayPlaceholder= "255.255.255.255";
+		// 过滤条件字段
+		//upfieldDefaultList.put("$filter", "scid_dmpcode");
+
+		//onInsert 默认值
+
+		//对非空进行修改赋值
+/*		for(Entry<String, Object> entry :doc.entrySet())
+		{
+			String key = entry.getKey();
+			Object value = entry.getValue();
+			
+			if((value instanceof String[])&&!isNullOrEmpty(value))
+				upfieldDefaultList.put(key, new UpdateField(Operator.set, key, value));
+			else if(!isNullOrEmpty(value))
+				upfieldDefaultList.put(key, new UpdateField(Operator.addEachToSet, key, value));
+		}*/
+		//部分如果一次插入，不再修改字段，可以直接用真值插入
+		upfieldDefaultList.put("scid_dmpcode", new UpdateField(Operator.setOnInsert, "scid_dmpcode", scid_dmpcode));
+		upfieldDefaultList.put("sspCode", new UpdateField(Operator.setOnInsert, "sspcode", sspcode));
+		upfieldDefaultList.put("dmp_code", new UpdateField(Operator.setOnInsert, "dmp_code", dmp_code));
+
+		//占位
+		upfieldDefaultList.put("dmp_cid", new UpdateField(Operator.setOnInsert, "dmp_cid", placeholder32));
+		upfieldDefaultList.put("dcid", new UpdateField(Operator.setOnInsert, "dcid", placeholder32));
+		upfieldDefaultList.put("scid", new UpdateField(Operator.setOnInsert, "scid", placeholder32));
+		upfieldDefaultList.put("cookie_mapping_in", new UpdateField(Operator.setOnInsert, "cookie_mapping_in", 100));
+		upfieldDefaultList.put("isApp", new UpdateField(Operator.setOnInsert, "isApp", placeholder32));
+		upfieldDefaultList.put("did", new UpdateField(Operator.setOnInsert, "did", placeholder32));
+		
+		
+		upfieldDefaultList.put("dpid", new UpdateField(Operator.setOnInsert, "dpid", placeholder32));
+		upfieldDefaultList.put("idfa", new UpdateField(Operator.setOnInsert, "idfa", placeholder32));
+		upfieldDefaultList.put("make", new UpdateField(Operator.setOnInsert, "make", placeholder32));
+		
+		upfieldDefaultList.put("model", new UpdateField(Operator.setOnInsert, "model", placeholder32));
+		upfieldDefaultList.put("os", new UpdateField(Operator.setOnInsert, "os", placeholder32));
+		upfieldDefaultList.put("did", new UpdateField(Operator.setOnInsert, "did", placeholder32));
+		
+		upfieldDefaultList.put("devicetype", new UpdateField(Operator.setOnInsert, "devicetype", placeholder32));
+		upfieldDefaultList.put("macmd5", new UpdateField(Operator.setOnInsert, "macmd5", placeholder64));
+		upfieldDefaultList.put("mac", new UpdateField(Operator.setOnInsert, "mac", placeholder64));
+		upfieldDefaultList.put("updatetime", new UpdateField(Operator.setOnInsert, "updatetime", placeholder32));
+		
+		for(Entry<String, Object> entry :doc.entrySet())
+		{
+			String key = entry.getKey();
+			Object value = entry.getValue();
+			
+			if(value instanceof List)
+			{
+				upfieldDefaultList.put(key + placeholder_suffix, new UpdateField(Operator.setOnInsert, key + placeholder_suffix, placeholderIp));
+			}
+			
+		}upfieldDefaultList.put("$filter1", Filters.eq("scid_dmpcode", scid_dmpcode));
+		//插入默认值，占位
+		upsertArrayMany(MONGODB_BID, new Document(upfieldDefaultList));
+
+		
+		//对非空进行修改赋值
+		for(Entry<String, Object> entry :doc.entrySet())
+		{
+			String key = entry.getKey();
+			Object value = entry.getValue();
+			
+			if((value instanceof List)&&!isNullOrEmpty(value)){
+				//清空 占位 数组
+				upfieldSetList.put(key + placeholder_suffix, new UpdateField(Operator.unset, key + placeholder_suffix, defaultArrayPlaceholder));
+				//合并
+				upfieldSetList.put(key, new UpdateField(Operator.addEachToSet, key, value));
+			}
+			else if(!isNullOrEmpty(value)){
+				if(key=="scid_dmpcode")
+					upfieldSetList.put("$filter1", Filters.eq(key, value));
+/*				else if(key=="updatetime")
+					upfieldSetList.put("$filter2", Filters.lt(key, value));*/
+				else if(isNotNeedUpdateForBid(key))
+					;//部分如果不发生字段，这里可以不做更新
+				else
+					//真正需要更新的字段
+					upfieldSetList.put(key, new UpdateField(Operator.set, key, value));
+
+			}
+		}
+	
+		upsertArrayMany(MONGODB_BID, new Document(upfieldSetList));
+	}
+	
+	public static boolean isNotNeedUpdateForBid(String str)
+	{
+		Set<String> fields = new HashSet<String>();
+		fields.add("scid_dmpcode");
+		fields.add("sspcode");
+		fields.add("dmp_code");
+		if(fields.contains(str))
+			return true;
+		else
+			return false;
+		
+	}
+	public static boolean isNullOrEmpty(Object req){
+		if(req==null) return true;
+		if(req instanceof String)
+			return "".equals(req);
+		if(req instanceof Integer)
+			return 0==(Integer)req;
+		if(req instanceof List)
+			return ((List<?>) req).size()==0;
+		return false;
+			
+	}
+	
 	static class Worker implements Runnable {
 		private final CountDownLatch startSignal;
 		private final CountDownLatch doneSignal;
@@ -669,6 +805,7 @@ public enum MongoDBBatchCURD {
 		}
 	}
 
+
 	/**
 	 * 批量更新文档
 	 * 
@@ -679,7 +816,17 @@ public enum MongoDBBatchCURD {
 	public static void upsertMany(String collectionName, Document document) {
 		insertMany(collectionName, document);
 	}
-
+	
+	/**
+	 * 批量更新数组文档
+	 * 
+	 * @param collectionName
+	 * @param document
+	 * @author zyh
+	 */
+	public static void upsertArrayMany(String collectionName, Document document) {
+		insertMany(collectionName, document);
+	}
 	/**
 	 * 批处理工作线程
 	 */
@@ -882,7 +1029,7 @@ public enum MongoDBBatchCURD {
 
 	public static class UpdateField {
 		public static enum Operator {
-			set, setOnInsert, addToSet, addEachToSet
+			set, setOnInsert, addToSet, addEachToSet,unset,pull
 		}
 
 		public UpdateField(String fieldName, Object value) {
@@ -898,6 +1045,95 @@ public enum MongoDBBatchCURD {
 		public Operator operator;
 		public String fieldName;
 		public Object value;
+	}
+	
+	
+	public static void main(String[] args) throws Throwable {
+
+		boolean start = false;
+		if(start){
+		int reqCount = 1000000;
+
+		try {
+			long begin = System.currentTimeMillis();
+			List<DBObject> dbObjects = new ArrayList<DBObject>();
+			for (int i = 0; i < reqCount; i++) {
+				Document dt = new Document();
+				dt.putAll((new InsertObject()).getLogClickDt());
+				dt.put("requestTimeID", i + "");
+				dt.put("requestID", i + "");
+				insertMany(MONGODB_WIN, dt);
+				insertSummary(dt, "wincount");
+
+				insertMany(MONGODB_EXPOS, dt);
+				insertSummary(dt, "exposcount");
+
+				insertMany(MONGODB_CLICK, dt);
+				insertSummary(dt, "clickcount");
+
+				if (i % batchProcessReqCount == 0)
+					Thread.sleep(reqSleep);
+			}
+			System.out.println("[" + new Date(System.currentTimeMillis()) + "] AllReq spend Time:"
+					+ (System.currentTimeMillis() - begin));
+
+			
+			 getCountDownLatch(MONGODB_CLICK).await();
+			 getCountDownLatch(MONGODB_EXPOS).await();
+			 getCountDownLatch(MONGODB_WIN).await();
+			 
+			getCountDownLatch(MONGODB_SUMMARY).await();
+			System.out.println("[" + new Date(System.currentTimeMillis()) + "] All spend Time:"
+					+ (System.currentTimeMillis() - begin));
+			// insertOne(collectionName, document);
+
+		} catch (Exception e) {
+			if (e instanceof MongoWriteException) {
+				String message = e.getMessage();
+				if (message == null) {
+					message = "";
+				}
+				if (message.startsWith("E11000")) {
+					System.out.println("no problem");
+				} else {
+					e.printStackTrace();
+				}
+			} else {
+				e.printStackTrace();
+			}
+			}
+		}else
+		{
+			Document dt = new Document();
+			dt.putAll((new InsertObject("Bid")).getLogDeviceDt());
+			insertSet(dt);
+			
+			MongoCollection<Document> collection = getCollection(MONGODB_BID);
+			
+			BlockingQueue<Document> queue = COLLECTION_MQ_MAP.get(MONGODB_BID);
+			for(int i=0;i<2;i++){
+				Document doc = queue.take();
+				
+				Bson filter = null;
+				for(Entry<String, Object> entry: doc.entrySet())
+				{
+					if(entry.getKey().startsWith("$filter"))
+					{
+						Bson tempFilter = (Bson) entry.getValue();
+						if(filter==null)
+							filter = tempFilter;
+						else
+							filter = Filters.and(filter,tempFilter);
+					}
+					
+				}
+				UpdateOptions uo = new UpdateOptions();
+				uo.upsert(true);
+				UpdateResult updateResult = collection.updateOne(filter, buildUpdate2(doc), uo);
+				String end ="";
+				
+			}
+		}
 	}
 
 }
