@@ -80,15 +80,6 @@ public class InsertObject {
 		logDeviceDt.put("cookie_mapping_in", 55);//1:cookie mapping插入，   
 		logDeviceDt.put("isApp", "123456789_123456789_123456789_12");//是否为移动流量，如"IsPCMark"; "IsAPPMark";
 
-		//array of string 
-		logDeviceDt.put("ip", Arrays.asList(new String[]{"10.0.0.101","10.0.0.103","10.0.0.104","10.0.0.102","10.0.0.105"}));// 增量，去重  数组（solr中ip；mongoDB中ip属性的值是city）
-		List<String> ips = new ArrayList<String>(100);
-		for(int i=0;i<5;i++)ips.add("10.0.0."+i);
-		logDeviceDt.put("ip",ips);
-		logDeviceDt.put("city", Arrays.asList(new String[]{"北京","上海","呼和浩特","呼和浩特1","呼和浩特","呼和浩特2"}));
-		logDeviceDt.put("keywords", Arrays.asList(new String[]{"三个字","只能五个字","最多五个字","只能3个字","最多2个字"}));//关键字      增量，去重  数组   暂时为空
-		logDeviceDt.put("userAttributeList", Arrays.asList(new String[]{"男","20-30岁","女","40-50岁","70-80岁"}));//原始用户属性和兴趣
-		
 		logDeviceDt.put("did", "123456789_123456789_123456789_12");//IMEI，不同SSP有的 MD5 哈希 ,有的没有
 		logDeviceDt.put("dpid", "123456789_123456789_123456789_12");//原始的平台相关 ID，Android ID 或 iOS 的 UDID，或者 windows phone 的 id，不同SSP有的 MD5 哈希 ,有的没有
 		logDeviceDt.put("idfa", "123456789_123456789_123456789_12");//广告标示符，适用于对外， iOS 的 IDFA 字 段 ，如： ”1E2DFA89-496A-47FD-9941-D F1FC4E6484A”
@@ -100,6 +91,18 @@ public class InsertObject {
 		logDeviceDt.put("mac", "123456789_123456789_123456789_123456789_123456789_123456789_1234");//MAC 地址，如“F0B4799A8CC9”
 		//Number
 		logDeviceDt.put("updatetime", new Date().getTime());//更新时间
+		
+		
+		//array of string 
+		logDeviceDt.put("ip", Arrays.asList(new String[]{"10.0.0.101","10.0.0.103","10.0.0.104","10.0.0.102","10.0.0.105"}));// 增量，去重  数组（solr中ip；mongoDB中ip属性的值是city）
+		List<String> ips = new ArrayList<String>(100);
+		for(int i=0;i<5;i++)ips.add("10.0.0."+i);
+		logDeviceDt.put("ip",ips);
+		logDeviceDt.put("city", Arrays.asList(new String[]{"北京","上海","呼和浩特","呼和浩特1","呼和浩特","呼和浩特2"}));
+		logDeviceDt.put("keywords", Arrays.asList(new String[]{"三个字","只能五个字","最多五个字","只能3个字","最多2个字"}));//关键字      增量，去重  数组   暂时为空
+		logDeviceDt.put("userAttributeList", Arrays.asList(new String[]{"男","20-30岁","女","40-50岁","70-80岁","73-80岁"}));//原始用户属性和兴趣
+		
+		
 
 	};
 

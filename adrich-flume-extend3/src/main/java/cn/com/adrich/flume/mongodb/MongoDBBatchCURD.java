@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -46,7 +48,7 @@ public enum MongoDBBatchCURD {
 	;
 	private static final Logger logger = LoggerFactory.getLogger(MongoDBBatchCURD.class);
 
-	public static final String placeholder_suffix = "_t";
+	public static final String place_holder = "placeholder";
 	public static final String MONGODB_WIN = "log_win";
 	public static final String MONGODB_EXPOS = "log_expos";
 	public static final String MONGODB_CLICK = "log_click";
@@ -59,6 +61,8 @@ public enum MongoDBBatchCURD {
 	public static int threadCountInSameTime = 8;
 	public static int reqSleep = 1000;
 	public static int threadSleep = 1000;
+	public static int startIndex = 0;
+	
 	// 四个阻塞队列
 	private static BlockingQueue<Document> Expos_Queue = new LinkedBlockingQueue<Document>(
 			batchProcessReqCount * blockQueueFactor);
@@ -95,6 +99,7 @@ public enum MongoDBBatchCURD {
 	public static final String MONGODB_THREAD_COUNT = "mongodb.threadCountInSameTime";
 	public static final String MONGODB_THREAD_REQSLEEP = "mongodb.reqSleep";
 	public static final String MONGODB_THREAD_SLEEP = "mongodb.threadSleep";
+	public static final String MONGODB_START_INDEX = "mongodb.startIndex";
 
 	private static MongoClient MONGO_CLIENT;
 	private static MongoDatabase DATABASE;
@@ -135,6 +140,7 @@ public enum MongoDBBatchCURD {
 			// 工作线程批处理延迟
 			threadSleep = Integer.parseInt(p.getProperty(MONGODB_THREAD_SLEEP));
 
+			startIndex = Integer.parseInt(p.getProperty(MONGODB_THREAD_SLEEP));
 			// 将库中已存在的集合放入 Map 中缓存
 			COLLECTION_MAP = new ConcurrentHashMap<String, MongoCollection<Document>>();
 
@@ -357,11 +363,16 @@ public enum MongoDBBatchCURD {
 		List<Bson> updates = null;
 		if (updateMap != null) {
 			updates = new ArrayList<Bson>();
-			for (Entry<String, Object> entry : updateMap.entrySet()) {
-				//String typeName = entry.getKey();
-				if(entry.getKey().startsWith("$filter"))
+			Iterator<Entry<String, Object>> iterator= updateMap.entrySet().iterator();  
+			while(iterator.hasNext())  
+			{  
+			    Entry<String, Object> entry = iterator.next();
+				String typeName =  entry.getKey();
+				
+				if(typeName.startsWith("$filter"))
 					continue;
 				UpdateField typeValue = (UpdateField) entry.getValue();
+			    
 				Bson updateTemp = null;
 
 				switch (typeValue.operator) {
@@ -626,20 +637,23 @@ public enum MongoDBBatchCURD {
 		String updatetime = doc.getString("updatetime");	*/	
 				
 
-		Map<String, Object> upfieldDefaultList = new HashMap<String, Object>(12);
-		Map<String, Object> upfieldSetList = new HashMap<String, Object>(12);
+		Map<String, Object> upfieldDefaultList = new LinkedHashMap<String, Object>(25);
+		Map<String, Object> upfieldSetList = new LinkedHashMap<String, Object>(25);
 
 		String placeholder10 ="1234567890";
 		String placeholder20 ="12345678901234567890";
 		String placeholder64 ="123456789_123456789_123456789_123456789_123456789_123456789_1234";
 		String placeholder32 ="123456789_123456789_123456789_12";
-		List<String> placeholderIp = new ArrayList<String>(5);
+		List<String> placeholderIp = new ArrayList<String>(10);
 		placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");
 		placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");
-		List<String> placeholderArr = new ArrayList<String>(5);
+		placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");
+		placeholderIp.add("255.255.255.255");placeholderIp.add("255.255.255.255");
+		List<String> placeholderArr = new ArrayList<String>(10);
 		placeholderArr.add("1234567890");placeholderArr.add("1234567890");placeholderArr.add("1234567890");
 		placeholderArr.add("1234567890");placeholderArr.add("1234567890");
-
+		placeholderArr.add("1234567890");placeholderArr.add("1234567890");placeholderArr.add("1234567890");
+		placeholderArr.add("1234567890");placeholderArr.add("1234567890");
 		String defaultArrayPlaceholder= "255.255.255.255";
 		// 过滤条件字段
 		//upfieldDefaultList.put("$filter", "scid_dmpcode");
@@ -684,17 +698,20 @@ public enum MongoDBBatchCURD {
 		upfieldDefaultList.put("mac", new UpdateField(Operator.setOnInsert, "mac", placeholder64));
 		upfieldDefaultList.put("updatetime", new UpdateField(Operator.setOnInsert, "updatetime", placeholder32));
 		
+		//占位符，数组长度为10*n（数组个数）
+		List<String> wholePlaceholder = new ArrayList<String>();
 		for(Entry<String, Object> entry :doc.entrySet())
 		{
-			String key = entry.getKey();
 			Object value = entry.getValue();
-			
 			if(value instanceof List)
 			{
-				upfieldDefaultList.put(key + placeholder_suffix, new UpdateField(Operator.setOnInsert, key + placeholder_suffix, placeholderIp));
+				wholePlaceholder.addAll(placeholderIp);
 			}
-			
-		}upfieldDefaultList.put("$filter1", Filters.eq("scid_dmpcode", scid_dmpcode));
+		}
+		
+		upfieldDefaultList.put(place_holder, new UpdateField(Operator.setOnInsert, place_holder, wholePlaceholder));
+
+		upfieldDefaultList.put("$filter1", Filters.eq("scid_dmpcode", scid_dmpcode));
 		//插入默认值，占位
 		upsertArrayMany(MONGODB_BID, new Document(upfieldDefaultList));
 
@@ -707,16 +724,17 @@ public enum MongoDBBatchCURD {
 			
 			if((value instanceof List)&&!isNullOrEmpty(value)){
 				//清空 占位 数组
-				upfieldSetList.put(key + placeholder_suffix, new UpdateField(Operator.unset, key + placeholder_suffix, defaultArrayPlaceholder));
+				upfieldSetList.put(place_holder , new UpdateField(Operator.unset, place_holder, 1));
 				//合并
 				upfieldSetList.put(key, new UpdateField(Operator.addEachToSet, key, value));
 			}
 			else if(!isNullOrEmpty(value)){
 				if(key=="scid_dmpcode")
 					upfieldSetList.put("$filter1", Filters.eq(key, value));
-/*				else if(key=="updatetime")
-					upfieldSetList.put("$filter2", Filters.lt(key, value));*/
-				else if(isNotNeedUpdateForBid(key))
+				else if(key=="updatetime")
+					upfieldSetList.put("$filter2", Filters.lt(key, value));
+
+				if(isNotNeedUpdateForBid(key))
 					;//部分如果不发生字段，这里可以不做更新
 				else
 					//真正需要更新的字段
@@ -907,9 +925,14 @@ public enum MongoDBBatchCURD {
 
 						String keyName = summary.getString("$filter");
 						UpdateField keyValue = (UpdateField) summary.get(keyName);
+						try{
 						collection.updateOne(Filters.eq(keyName, keyValue.value), buildUpdate2(summary),
 								upsert.upsert(true));
-					}
+						}catch(Exception e)
+						{
+							throw e;
+						}
+						}
 				}
 			} else
 				collection.insertMany(batchList);
@@ -1052,14 +1075,14 @@ public enum MongoDBBatchCURD {
 	
 	public static void main(String[] args) throws Throwable {
 
-		boolean start = true;
+		boolean start = false;
 		if(start){
-		int reqCount = 1000000;
+		int reqCount = startIndex+1000000;
 
 		try {
 			long begin = System.currentTimeMillis();
 			List<DBObject> dbObjects = new ArrayList<DBObject>();
-			for (int i = 0; i < reqCount; i++) {
+			for (int i = startIndex; i < reqCount; i++) {
 				Document dt = new Document();
 				dt.putAll((new InsertObject()).getLogClickDt());
 				dt.put("requestTimeID", i + "");
@@ -1068,9 +1091,9 @@ public enum MongoDBBatchCURD {
 				insertMany(MONGODB_EXPOS, dt);
 				insertMany(MONGODB_CLICK, dt);
 				
-/*				insertSummary2(dt, "wincount");
+				insertSummary2(dt, "wincount");
 				insertSummary2(dt, "exposcount");
-				insertSummary2(dt, "clickcount");*/
+				insertSummary2(dt, "clickcount");
 
 				if (i % batchProcessReqCount == 0)
 					Thread.sleep(reqSleep);

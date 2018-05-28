@@ -375,16 +375,16 @@ public enum MongodbCrud {
 			
 			long begin = System.currentTimeMillis();
 			List<DBObject> dbObjects = new ArrayList<DBObject>();
-			for (int i = 0; i < 1000000; i++) {
+			for (int i = 0; i < 2000000; i++) {
 				Document dt = new Document();
 				dt.putAll((new InsertObject()).getLogClickDt());
 				dt.put("random", i);
-				//insertOne(MONGODB_EXPOS, dt);
+				insertOne(MONGODB_EXPOS, dt);
 				insertSummary(dt, "exposcount");
-				/*				insertOne(MONGODB_CLICK, dt);
+				insertOne(MONGODB_CLICK, dt);
 				insertSummary(dt, "clickcount");
 				insertOne(MONGODB_WIN, dt);
-				insertSummary(dt, "wincount");*/
+				insertSummary(dt, "wincount");
 /*				if(i%10000==0)
 					Thread.sleep(1000);*/
 			}
