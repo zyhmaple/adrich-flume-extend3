@@ -542,7 +542,7 @@ public enum MongoDBBatchCURD {
 		}
 		set.put(countType, 1);
 
-		document.put("$id", "requestTimeID");
+		document.put("$filter", "requestTimeID");
 		document.put("$onInsert", setOnInsert);
 		document.put("$set", set);
 
@@ -941,6 +941,8 @@ public enum MongoDBBatchCURD {
 
 		// 将doc1 整合到doc2
 		for (Object obj : doc1.values()) {
+			if(!(obj instanceof UpdateField))continue;
+			
 			UpdateField field = (UpdateField) obj;
 			if (Operator.set.equals(field.operator)) {
 				UpdateField newSet = (UpdateField) doc1.get(field.fieldName);
@@ -1050,7 +1052,7 @@ public enum MongoDBBatchCURD {
 	
 	public static void main(String[] args) throws Throwable {
 
-		boolean start = false;
+		boolean start = true;
 		if(start){
 		int reqCount = 1000000;
 
@@ -1063,13 +1065,12 @@ public enum MongoDBBatchCURD {
 				dt.put("requestTimeID", i + "");
 				dt.put("requestID", i + "");
 				insertMany(MONGODB_WIN, dt);
-				insertSummary(dt, "wincount");
-
 				insertMany(MONGODB_EXPOS, dt);
-				insertSummary(dt, "exposcount");
-
 				insertMany(MONGODB_CLICK, dt);
-				insertSummary(dt, "clickcount");
+				
+/*				insertSummary2(dt, "wincount");
+				insertSummary2(dt, "exposcount");
+				insertSummary2(dt, "clickcount");*/
 
 				if (i % batchProcessReqCount == 0)
 					Thread.sleep(reqSleep);

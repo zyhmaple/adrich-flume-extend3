@@ -70,7 +70,7 @@ public class InsertObject {
 	public InsertObject(String Device) {
 		if(Device!="")
 		logDeviceDt = new Document();
-		logDeviceDt.put("scid_dmpcode", "key004");//分片片键；hash，唯一索引
+		logDeviceDt.put("scid_dmpcode", "key002");//分片片键；hash，唯一索引
 		logDeviceDt.put("sspcode", "_0004");//Ssp标识
 		logDeviceDt.put("dmp_code", "DMP0001");//DMP标识，移动流量用
 		logDeviceDt.put("dmp_cid", "123456789_123456789_123456789_12");
